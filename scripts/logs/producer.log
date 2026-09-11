@@ -1,0 +1,4 @@
+/home/zeyad/data-eng-projects/SIC_Task_Projects/Kafka/Task1/producer/generate_orders.py:57: DeprecationWarning: key_serializer does not implement kafka.serializer.Serializer
+  producer = build_producer()
+/home/zeyad/data-eng-projects/SIC_Task_Projects/Kafka/Task1/producer/generate_orders.py:57: DeprecationWarning: value_serializer does not implement kafka.serializer.Serializer
+  producer = build_producer()

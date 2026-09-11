@@ -1,0 +1,143 @@
+networks:
+  platform:
+    driver: bridge
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
+  pg_metastore_data:
+  warehouse:
+
+services:
+  # -------------------------------------------------------------------
+  # KAFKA (unchanged from before — this part was already working)
+  # -------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+    networks: [platform]
+
+  # -------------------------------------------------------------------
+  # HDFS — namenode/datanode (bde2020 images: 3.2.1, not 3.4.0 — see README
+  # for why; these are proven and env-var driven, which matters more right
+  # now than matching the exact version number).
+  # -------------------------------------------------------------------
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=datalake
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_replication=1
+    ports:
+      - "9870:9870"   # NameNode web UI
+      - "9000:9000"   # HDFS RPC
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+    networks: [platform]
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_replication=1
+      - SERVICE_PRECONDITION=namenode:9870
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    depends_on:
+      - namenode
+    networks: [platform]
+
+  # -------------------------------------------------------------------
+  # HIVE 4.0.0 — official apache/hive image, split metastore / hiveserver2,
+  # external Postgres-backed metastore (see ./hive/Dockerfile for the
+  # Postgres JDBC driver that image doesn't ship with by default).
+  # -------------------------------------------------------------------
+  postgres-metastore:
+    image: postgres:13
+    container_name: postgres-metastore
+    environment:
+      POSTGRES_DB: metastore_db
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hivepassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_metastore_data:/var/lib/postgresql/data
+    networks: [platform]
+
+  hive-metastore:
+    build: ./hive
+    container_name: hive-metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres-metastore:5432/metastore_db
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hivepassword
+      HIVE_CUSTOM_CONF_DIR: /hive_custom_conf
+    volumes:
+      - ./hive/conf:/hive_custom_conf
+      - warehouse:/opt/hive/data/warehouse
+    ports:
+      - "9083:9083"   # metastore thrift port
+    depends_on:
+      - postgres-metastore
+      - namenode
+      - datanode
+    restart: on-failure
+    networks: [platform]
+
+  hive-server:
+    build: ./hive
+    container_name: hive-server
+    environment:
+      SERVICE_NAME: hiveserver2
+      SERVICE_OPTS: -Dhive.metastore.uris=thrift://hive-metastore:9083
+      HIVE_CUSTOM_CONF_DIR: /hive_custom_conf
+    volumes:
+      - ./hive/conf:/hive_custom_conf
+    ports:
+      - "10000:10000"  # Thrift — this is what Hue/beeline connect to
+      - "10002:10002"  # HiveServer2 web UI
+    depends_on:
+      - hive-metastore
+    restart: on-failure
+    networks: [platform]
+
+  # -------------------------------------------------------------------
+  # HUE — query editor UI
+  # -------------------------------------------------------------------
+  hue:
+    image: gethue/hue:latest
+    container_name: hue
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./hue/hue.ini:/usr/share/hue/desktop/conf/hue.ini
+    depends_on:
+      - hive-server
+    networks: [platform]
